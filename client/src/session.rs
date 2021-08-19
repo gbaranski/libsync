@@ -52,8 +52,9 @@ impl Session {
             let frame = recv(&self.socket, &mut buf).await?;
             match frame {
                 ServerFrame::Write { bytes } => {
+                    term.clear_screen()?;
                     term.write(&bytes)?;
-                    term.flush().unwrap();
+                    term.flush()?;
                 }
             };
         }
