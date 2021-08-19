@@ -87,7 +87,7 @@ impl Server {
     ) -> Result<Option<ServerFrame>, Error> {
         let frame = match frame {
             ClientFrame::Write { bytes } => {
-                *self.state.lock().await = bytes;
+                self.state.lock().await.extend(&bytes);
                 None
             }
         };
@@ -105,7 +105,7 @@ impl Server {
                     .await?;
                 tracing::debug!("Sent: {:?}", frame);
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(64)).await;
         }
     }
 }
