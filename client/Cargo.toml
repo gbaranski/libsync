@@ -8,9 +8,8 @@ edition = "2018"
 [dependencies]
 console = "0.14.1"
 libsync = { path = "../core" }
-serde_json = "1.0.66"
 thiserror = "1.0.26"
-tokio = { version = "1.10.0", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { version = "1.10.0", features = ["macros", "rt-multi-thread", "net", "sync"] }
 tracing = "0.1.26"
 tracing-subscriber = "0.2.19"
 xdg = "2.2.0"

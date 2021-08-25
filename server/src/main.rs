@@ -1,4 +1,4 @@
-use libsync::{ClientFrame, ServerFrame, PORT};
+use libsync::{ClientFrame, DeserializeError, SerializeError, ServerFrame, PORT};
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
@@ -13,8 +13,10 @@ use tokio::{
 enum Error {
     #[error("session: {0}")]
     IO(#[from] std::io::Error),
-    #[error("json: {0}")]
-    JSON(#[from] serde_json::Error),
+    #[error("serialize: {0}")]
+    Serialize(#[from] SerializeError),
+    #[error("serialize: {0}")]
+    Deserialize(#[from] DeserializeError),
 }
 
 #[derive(Clone)]
@@ -22,6 +24,7 @@ struct Server {
     socket: Arc<UdpSocket>,
     address: Arc<RwLock<Option<SocketAddr>>>,
     state: Arc<Mutex<Vec<u8>>>,
+    prev_state: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Server {
@@ -30,6 +33,7 @@ impl Server {
         Ok(Self {
             address: Arc::new(RwLock::new(None)),
             state: Arc::new(Mutex::new(Vec::with_capacity(1024))),
+            prev_state: Arc::new(Mutex::new(Vec::with_capacity(1024))),
             socket: Arc::new(socket),
         })
     }
@@ -68,12 +72,12 @@ impl Server {
                 *self.address.write().await = Some(from);
             }
             let bytes = &buf[..n];
-            let frame = serde_json::from_slice(bytes)?;
+            let frame = ClientFrame::deserialize(bytes)?;
             tracing::debug!("Received: {:?}", frame);
             if let Some(frame) = self.handle_message(frame, from).await? {
                 tracing::debug!("Sent: {:?}", frame);
                 self.socket
-                    .send_to(&serde_json::to_vec(&frame)?, from)
+                    .send_to(frame.serialize()?.as_bytes(), from)
                     .await?;
             }
         }
@@ -86,8 +90,18 @@ impl Server {
         from: SocketAddr,
     ) -> Result<Option<ServerFrame>, Error> {
         let frame = match frame {
-            ClientFrame::Write { bytes } => {
-                self.state.lock().await.extend(&bytes);
+            ClientFrame::Write { bytes, checksum } => {
+                let mut state = self.state.lock().await;
+                let mut prev_state = self.prev_state.lock().await;
+                state.extend(&bytes);
+                prev_state.extend(&bytes);
+                if libsync::checksum(&state) != checksum {
+                    todo!(
+                        "checksum don't match. Expected: {}, Received: {}",
+                        libsync::checksum(&state),
+                        checksum
+                    );
+                }
                 None
             }
         };
@@ -97,11 +111,16 @@ impl Server {
     async fn send_state(&self) -> Result<(), Error> {
         loop {
             if let Some(address) = *self.address.read().await {
+                let state = self.state.lock().await;
+                let mut prev_state = self.prev_state.lock().await;
+                let stripped_state = state.strip_prefix(prev_state.as_slice()).unwrap_or(&[]);
+                *prev_state = state.to_vec();
                 let frame = ServerFrame::Write {
-                    bytes: self.state.lock().await.to_owned(),
+                    bytes: stripped_state.to_vec(),
+                    checksum: libsync::checksum(&state),
                 };
                 self.socket
-                    .send_to(&serde_json::to_vec(&frame)?, address)
+                    .send_to(frame.serialize()?.as_bytes(), address)
                     .await?;
                 tracing::debug!("Sent: {:?}", frame);
             }

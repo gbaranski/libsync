@@ -1,9 +1,7 @@
 mod session;
 
-use std::net::{Ipv4Addr, SocketAddrV4};
-
-use libsync::ClientFrame;
 use session::Session;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";
@@ -19,10 +17,10 @@ fn init_logging() {
 
     tracing_subscriber::fmt()
         .with_writer(|| {
-            let log_file_path = xdg::BaseDirectories::with_prefix("jaw")
+            let log_file_path = xdg::BaseDirectories::with_prefix("libsync")
                 .unwrap()
                 .get_cache_home()
-                .join("jaw.log");
+                .join("libsync.log");
             if !log_file_path.exists() {
                 std::fs::create_dir_all(&log_file_path.parent().unwrap()).unwrap();
             }
@@ -95,10 +93,6 @@ async fn read_input(session: Session) -> Result<(), Box<dyn std::error::Error>> 
     let term = console::Term::stdout();
     loop {
         let input = get_input(&term, &mut buf);
-        session
-            .send(ClientFrame::Write {
-                bytes: input.to_vec(),
-            })
-            .await?;
+        session.write(input).await?;
     }
 }
