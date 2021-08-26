@@ -1,7 +1,7 @@
 mod session;
 
 use session::Session;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4, ToSocketAddrs};
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";
@@ -39,8 +39,29 @@ fn init_logging() {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
-    let session =
-        Session::new(SocketAddrV4::new(Ipv4Addr::LOCALHOST, libsync::PORT).into()).await?;
+    let matches = clap::App::new(clap::crate_name!())
+        .bin_name(clap::crate_name!())
+        .version(clap::crate_version!())
+        .author(clap::crate_authors!())
+        .about("Synchronization protocol client")
+        .arg(
+            clap::Arg::with_name("address")
+                .help("Target address")
+                .default_value("127.0.0.1")
+                .takes_value(true),
+        )
+        .get_matches();
+    let address = matches.value_of("address").unwrap();
+    let address = match address.split_once(':') {
+        Some((host, port)) => (host, port.parse().expect("invalid port")),
+        None => (address, libsync::PORT),
+    }
+    .to_socket_addrs()
+    .expect("invalid address")
+    .next()
+    .unwrap();
+
+    let session = Session::new(address).await?;
     let run_session_task = {
         let session = session.clone();
         tokio::spawn(async move { session.run().await.unwrap() })

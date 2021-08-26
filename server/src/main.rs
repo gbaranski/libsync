@@ -1,6 +1,7 @@
-use libsync::{ClientFrame, DeserializeError, SerializeError, ServerFrame, PORT};
+use libsync::{ClientFrame, DeserializeError, SerializeError, ServerFrame};
 use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -28,8 +29,8 @@ struct Server {
 }
 
 impl Server {
-    pub async fn new() -> Result<Self, Error> {
-        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, PORT)).await?;
+    pub async fn new(address: SocketAddr) -> Result<Self, Error> {
+        let socket = UdpSocket::bind(address).await?;
         Ok(Self {
             address: Arc::new(RwLock::new(None)),
             state: Arc::new(Mutex::new(Vec::with_capacity(1024))),
@@ -131,7 +132,6 @@ impl Server {
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";
-    use std::str::FromStr;
     use tracing::Level;
     use tracing_subscriber::EnvFilter;
 
@@ -148,7 +148,27 @@ fn init_logging() {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
-    let server = Server::new().await?;
+
+    let matches = clap::App::new(clap::crate_name!())
+        .bin_name(clap::crate_name!())
+        .version(clap::crate_version!())
+        .author(clap::crate_authors!())
+        .about("Synchronization protocol server")
+        .arg(
+            clap::Arg::with_name("address")
+                .help("Target address")
+                .default_value("127.0.0.1")
+                .takes_value(true),
+        )
+        .get_matches();
+    let address = matches.value_of("address").unwrap();
+    let (ip, port) = match address.split_once(':') {
+        Some((host, port)) => (host, port.parse().expect("invalid port")),
+        None => (address, libsync::PORT),
+    };
+    let ip = IpAddr::from_str(ip).expect("invalid ip address");
+
+    let server = Server::new(SocketAddr::new(ip, port)).await?;
     tracing::info!("Starting server");
     server.run().await.unwrap();
     Ok(())
