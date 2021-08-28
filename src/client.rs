@@ -1,8 +1,11 @@
-use crate::AtomicSequenceNumber;
-use crate::DeserializeError;
-use crate::Frame;
-use crate::SequenceNumber;
-use crate::SerializeError;
+use crate::delta;
+use crate::delta::Delta;
+use crate::delta::Deltas;
+use crate::frame::AtomicSequenceNumber;
+use crate::frame::DeserializeError;
+use crate::frame::Frame;
+use crate::frame::SequenceNumber;
+use crate::frame::SerializeError;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -24,9 +27,8 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Session {
     socket: Arc<UdpSocket>,
-    seqn: Arc<AtomicSequenceNumber>,
     // TODO: Consider changing to Vec instead of BTreeMap
-    deltas: Arc<Mutex<BTreeMap<SequenceNumber, Vec<u8>>>>,
+    deltas: Arc<Mutex<Deltas>>,
     /// Last acknowledged sequence number
     last_acknowledged_seqn: Arc<AtomicSequenceNumber>,
 }
@@ -43,8 +45,7 @@ impl Session {
 
         Ok(Self {
             socket: Arc::new(socket),
-            seqn: Arc::new(AtomicSequenceNumber::new(0)),
-            deltas: Arc::new(Mutex::new(BTreeMap::new())),
+            deltas: Arc::new(Mutex::new(Deltas::default())),
             last_acknowledged_seqn: Arc::new(AtomicSequenceNumber::new(0)),
         })
     }
@@ -72,16 +73,15 @@ impl Session {
     async fn handle_frame(&self, frame: Frame) -> Result<Option<Frame>, Error> {
         Ok(match frame {
             Frame::Write {
-                bytes,
+                delta,
                 checksum,
                 seqn,
             } => {
-                self.seqn.store(seqn, std::sync::atomic::Ordering::Relaxed);
                 let mut deltas = self.deltas.lock().await;
-                tracing::debug!("Current state: {:?}", resolve_deltas(&deltas));
-                deltas.insert(seqn, bytes);
-                tracing::debug!("State after write: {:?}", resolve_deltas(&deltas));
-                let new_checksum = crate::checksum(&*deltas);
+                tracing::debug!("Current state: {:?}", deltas);
+                deltas.insert(seqn, delta);
+                tracing::debug!("State after write: {:?}", deltas);
+                let new_checksum = deltas.checksum();
                 if new_checksum != checksum {
                     todo!(
                         "checksum don't match. Expected: {}, Received: {}",
@@ -99,32 +99,29 @@ impl Session {
         })
     }
 
+    #[tracing::instrument(skip(self))]
     async fn send(&self, frame: Frame) -> Result<(), Error> {
         self.socket.send(frame.serialize()?.as_bytes()).await?;
-        tracing::debug!("Sent {:?}", frame);
+        tracing::debug!("Sent frame");
         Ok(())
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn write(&self, bytes: &[u8]) -> Result<(), Error> {
+    pub async fn write(&self, delta: Delta) -> Result<(), Error> {
         let last_acknowledged_seqn = self
             .last_acknowledged_seqn
             .load(std::sync::atomic::Ordering::Relaxed);
-        let seqn = self.seqn.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let mut deltas = self.deltas.lock().await;
-        deltas.insert(seqn, bytes.to_vec());
-        let checksum = crate::checksum(&*deltas);
-        tracing::debug!("Current state: {:?}", resolve_deltas(&deltas));
-        let total_bytes = deltas
-            .range((last_acknowledged_seqn + 1)..)
-            .map(|(_, delta)| delta)
-            .flatten()
-            .cloned()
-            .collect();
+        let seqn = deltas.latest_seqn() + 1;
+        deltas.insert(seqn, delta);
+        tracing::debug!("State: {:?}", deltas);
+        let unacknowledged_deltas = deltas.since(&last_acknowledged_seqn);
+        tracing::debug!("Unacknowledged deltas: {:?}", unacknowledged_deltas);
+        let unacknowledged_delta = delta::merge(unacknowledged_deltas.iter());
 
         self.send(Frame::Write {
-            bytes: total_bytes,
-            checksum,
+            delta: unacknowledged_delta,
+            checksum: deltas.checksum(),
             seqn,
         })
         .await?;

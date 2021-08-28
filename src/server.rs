@@ -1,14 +1,19 @@
-use crate::AtomicSequenceNumber;
-use crate::DeserializeError;
-use crate::Frame;
-use crate::SequenceNumber;
-use crate::SerializeError;
+use crate::delta;
+use crate::delta::Delta;
+use crate::delta::Deltas;
+use crate::frame::AtomicSequenceNumber;
+use crate::frame::DeserializeError;
+use crate::frame::Frame;
+use crate::frame::SequenceNumber;
+use crate::frame::SerializeError;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+
+pub const DEFAULT_PORT: u16 = 7070;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,7 +30,7 @@ pub struct Server {
     socket: Arc<UdpSocket>,
     address: Arc<RwLock<Option<SocketAddr>>>,
     // TODO: Consider changing to Vec instead of BTreeMap
-    deltas: Arc<Mutex<BTreeMap<SequenceNumber, Vec<u8>>>>,
+    deltas: Arc<Mutex<Deltas>>,
     /// Last acknowledged sequence number
     last_acknowledged_seqn: Arc<AtomicSequenceNumber>,
 }
@@ -37,12 +42,16 @@ pub fn resolve_deltas(deltas: &BTreeMap<SequenceNumber, Vec<u8>>) -> Vec<u8> {
 impl Server {
     pub async fn new(address: SocketAddr) -> Result<Self, Error> {
         let socket = UdpSocket::bind(address).await?;
-        Ok(Self {
+        Ok(Self::with_socket(socket))
+    }
+
+    pub fn with_socket(socket: UdpSocket) -> Self {
+        Self {
             address: Arc::new(RwLock::new(None)),
             socket: Arc::new(socket),
-            deltas: Arc::new(Mutex::new(BTreeMap::new())),
+            deltas: Arc::new(Mutex::new(Deltas::new())),
             last_acknowledged_seqn: Arc::new(AtomicSequenceNumber::new(0)),
-        })
+        }
     }
 
     pub async fn run(&self) -> Result<(), Error> {
@@ -66,40 +75,37 @@ impl Server {
         }
     }
 
-    #[tracing::instrument(skip(self, frame))]
+    #[tracing::instrument(skip(self))]
     async fn handle_frame(&self, frame: Frame, from: SocketAddr) -> Result<Option<Frame>, Error> {
         Ok(match frame {
             Frame::Write {
-                bytes,
+                delta,
                 checksum,
                 seqn,
             } => {
                 let mut deltas = self.deltas.lock().await;
-                tracing::debug!("Current state: {:?}", resolve_deltas(&deltas));
-                let latest_seqn = deltas.keys().rev().next();
-                match latest_seqn {
-                    Some(latest_seqn) if *latest_seqn >= seqn => {
-                        tracing::debug!(
-                            "Received seqn: {} is lower than latest seqn: {}. Skipping update",
-                            seqn,
-                            latest_seqn
+                tracing::debug!("State: {:?}", deltas);
+                let latest_seqn = deltas.latest_seqn();
+                if deltas.latest_seqn() > seqn {
+                    tracing::debug!(
+                        "Received seqn: {} is lower than latest seqn: {}. Skipping update",
+                        seqn,
+                        latest_seqn
+                    );
+                    None
+                } else {
+                    deltas.insert(seqn, delta);
+                    tracing::debug!("State after update: {:?}", deltas);
+                    let new_checksum = deltas.checksum();
+                    if new_checksum != checksum {
+                        todo!(
+                            "checksum don't match. Expected: {}, Received: {}",
+                            new_checksum,
+                            checksum
                         );
                     }
-                    _ => {
-                        deltas.insert(seqn, bytes);
-                        tracing::debug!("State after update: {:?}", resolve_deltas(&deltas));
-                    }
-                };
-
-                let new_checksum = crate::checksum(&*deltas);
-                if new_checksum != checksum {
-                    todo!(
-                        "checksum don't match. Expected: {}, Received: {}",
-                        new_checksum,
-                        checksum
-                    );
+                    Some(Frame::WriteAck { seqn })
                 }
-                Some(Frame::WriteAck { seqn })
             }
             Frame::WriteAck { seqn } => {
                 self.last_acknowledged_seqn
@@ -117,28 +123,22 @@ impl Server {
         Ok(())
     }
 
-    pub async fn write(&self, address: &SocketAddr, bytes: &[u8]) -> Result<(), Error> {
+    pub async fn write(&self, address: &SocketAddr, delta: Delta) -> Result<(), Error> {
         let last_acknowledged_seqn = self
             .last_acknowledged_seqn
             .load(std::sync::atomic::Ordering::Relaxed);
         let mut deltas = self.deltas.lock().await;
-        let seqn = match deltas.keys().rev().next() {
-            Some(seqn) => seqn + 1,
-            None => 0,
-        };
-        deltas.insert(seqn, bytes.to_vec());
-        let checksum = crate::checksum(&*deltas);
-        let unacknowledged_deltas = deltas
-            .range(last_acknowledged_seqn..)
-            .map(|(_, delta)| delta)
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
+        let seqn = deltas.latest_seqn();
+        deltas.insert(seqn, delta);
+        tracing::debug!("State: {:?}", deltas);
+        let unacknowledged_deltas = deltas.since(&last_acknowledged_seqn);
+        let unacknowledged_delta = delta::merge(unacknowledged_deltas.iter());
+
         self.send(
-            &address,
+            address,
             Frame::Write {
-                bytes: unacknowledged_deltas,
-                checksum,
+                delta: unacknowledged_delta,
+                checksum: deltas.checksum(),
                 seqn,
             },
         )

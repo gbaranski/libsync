@@ -1,4 +1,5 @@
 use libsync::client::Session;
+use libsync::delta::Delta;
 use std::net::ToSocketAddrs;
 
 fn init_logging() {
@@ -112,6 +113,6 @@ async fn read_input(session: Session) -> Result<(), Box<dyn std::error::Error>> 
     let term = console::Term::stdout();
     loop {
         let input = get_input(&term, &mut buf);
-        session.write(input).await?;
+        session.write(Delta::Append(input.to_vec())).await?;
     }
 }
