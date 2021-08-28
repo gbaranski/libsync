@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::RwLock;
 
 pub const DEFAULT_PORT: u16 = 7070;
@@ -30,7 +31,8 @@ pub struct Server {
     socket: Arc<UdpSocket>,
     address: Arc<RwLock<Option<SocketAddr>>>,
     // TODO: Consider changing to Vec instead of BTreeMap
-    deltas: Arc<Mutex<Deltas>>,
+    pub deltas: Arc<Mutex<Deltas>>,
+    pub write_notify: Arc<Notify>,
     /// Last acknowledged sequence number
     last_acknowledged_seqn: Arc<AtomicSequenceNumber>,
 }
@@ -51,6 +53,7 @@ impl Server {
             socket: Arc::new(socket),
             deltas: Arc::new(Mutex::new(Deltas::new())),
             last_acknowledged_seqn: Arc::new(AtomicSequenceNumber::new(0)),
+            write_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -86,7 +89,7 @@ impl Server {
                 let mut deltas = self.deltas.lock().await;
                 tracing::debug!("State: {:?}", deltas);
                 let latest_seqn = deltas.latest_seqn();
-                if deltas.latest_seqn() > seqn {
+                let response = if deltas.latest_seqn() > seqn {
                     tracing::debug!(
                         "Received seqn: {} is lower than latest seqn: {}. Skipping update",
                         seqn,
@@ -105,7 +108,9 @@ impl Server {
                         );
                     }
                     Some(Frame::WriteAck { seqn })
-                }
+                };
+                self.write_notify.notify_one();
+                response
             }
             Frame::WriteAck { seqn } => {
                 self.last_acknowledged_seqn
