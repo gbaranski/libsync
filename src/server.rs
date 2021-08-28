@@ -1,17 +1,17 @@
-use libsync::{AtomicSequenceNumber, DeserializeError, Frame, SequenceNumber, SerializeError};
-use std::{
-    collections::BTreeMap,
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-    sync::Arc,
-};
-use tokio::{
-    net::UdpSocket,
-    sync::{Mutex, RwLock},
-};
+use crate::AtomicSequenceNumber;
+use crate::DeserializeError;
+use crate::Frame;
+use crate::SequenceNumber;
+use crate::SerializeError;
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub enum Error {
     #[error("session: {0}")]
     IO(#[from] std::io::Error),
     #[error("serialize: {0}")]
@@ -21,7 +21,7 @@ enum Error {
 }
 
 #[derive(Clone)]
-struct Server {
+pub struct Server {
     socket: Arc<UdpSocket>,
     address: Arc<RwLock<Option<SocketAddr>>>,
     // TODO: Consider changing to Vec instead of BTreeMap
@@ -91,7 +91,7 @@ impl Server {
                     }
                 };
 
-                let new_checksum = libsync::checksum(&*deltas);
+                let new_checksum = crate::checksum(&*deltas);
                 if new_checksum != checksum {
                     todo!(
                         "checksum don't match. Expected: {}, Received: {}",
@@ -117,7 +117,7 @@ impl Server {
         Ok(())
     }
 
-    async fn write(&self, address: &SocketAddr, bytes: &[u8]) -> Result<(), Error> {
+    pub async fn write(&self, address: &SocketAddr, bytes: &[u8]) -> Result<(), Error> {
         let last_acknowledged_seqn = self
             .last_acknowledged_seqn
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -127,7 +127,7 @@ impl Server {
             None => 0,
         };
         deltas.insert(seqn, bytes.to_vec());
-        let checksum = libsync::checksum(&*deltas);
+        let checksum = crate::checksum(&*deltas);
         let unacknowledged_deltas = deltas
             .range(last_acknowledged_seqn..)
             .map(|(_, delta)| delta)
@@ -145,69 +145,4 @@ impl Server {
         .await?;
         Ok(())
     }
-}
-
-fn init_logging() {
-    const LOG_ENV: &str = "RUST_LOG";
-    use tracing::Level;
-    use tracing_subscriber::EnvFilter;
-
-    let filter = std::env::var(LOG_ENV)
-        .map(|env| {
-            EnvFilter::from_str(env.to_uppercase().as_str())
-                .unwrap_or_else(|err| panic!("invalid `{}` environment variable {}", LOG_ENV, err))
-        })
-        .unwrap_or(EnvFilter::default().add_directive(Level::INFO.into()));
-
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logging();
-
-    let matches = clap::App::new(clap::crate_name!())
-        .bin_name(clap::crate_name!())
-        .version(clap::crate_version!())
-        .author(clap::crate_authors!())
-        .about("Synchronization protocol server")
-        .arg(
-            clap::Arg::with_name("address")
-                .help("Target address")
-                .default_value("127.0.0.1")
-                .takes_value(true),
-        )
-        .get_matches();
-    let address = matches.value_of("address").unwrap();
-    let (ip, port) = match address.split_once(':') {
-        Some((host, port)) => (host, port.parse().expect("invalid port")),
-        None => (address, libsync::PORT),
-    };
-    let ip = IpAddr::from_str(ip).expect("invalid ip address");
-
-    let server = Server::new(SocketAddr::new(ip, port)).await?;
-    tracing::info!("Starting server");
-    let run_server_task = {
-        let server = server.clone();
-        tokio::spawn(async move { server.run().await.expect("error when running a server") })
-    };
-    let send_new_deltas_task = {
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(512)).await;
-                // if let Some(address) = &*server.address.read().await {
-                //     server
-                //         .write(address, &[])
-                //         .await
-                //         .expect("error when sending new deltas");
-                // }
-            }
-        })
-    };
-
-    tokio::select! {
-        value = run_server_task => { value? },
-        value = send_new_deltas_task => { value? },
-    }
-    Ok(())
 }

@@ -1,7 +1,5 @@
+use libsync::client::Session;
 use std::net::ToSocketAddrs;
-
-mod session;
-use session::Session;
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";

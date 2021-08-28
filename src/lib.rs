@@ -1,3 +1,5 @@
+pub mod client;
+pub mod server;
 pub mod session;
 
 pub const PORT: u16 = 7070;
@@ -16,7 +18,8 @@ pub enum DeserializeError {
     Json(#[from] serde_json::Error),
 }
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
