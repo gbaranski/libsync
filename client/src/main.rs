@@ -1,7 +1,7 @@
-mod session;
+use std::net::ToSocketAddrs;
 
+mod session;
 use session::Session;
-use std::net::{Ipv4Addr, SocketAddrV4, ToSocketAddrs};
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";
