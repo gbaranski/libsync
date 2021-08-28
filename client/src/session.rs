@@ -26,6 +26,10 @@ pub enum Error {
     Deserialize(#[from] DeserializeError),
 }
 
+pub fn resolve_deltas(deltas: &BTreeMap<SequenceNumber, Vec<u8>>) -> Vec<u8> {
+    deltas.values().flatten().cloned().collect()
+}
+
 impl Session {
     #[tracing::instrument]
     pub async fn new(address: SocketAddr) -> Result<Self, Error> {
@@ -38,16 +42,6 @@ impl Session {
             deltas: Arc::new(Mutex::new(BTreeMap::new())),
             last_acknowledged_seqn: Arc::new(AtomicSequenceNumber::new(0)),
         })
-    }
-
-    pub async fn resolve_deltas(&self) -> Vec<u8> {
-        self.deltas
-            .lock()
-            .await
-            .values()
-            .flatten()
-            .cloned()
-            .collect()
     }
 
     pub async fn run(&self) -> Result<(), Error> {
@@ -78,20 +72,18 @@ impl Session {
                 seqn,
             } => {
                 self.seqn.store(seqn, std::sync::atomic::Ordering::Relaxed);
-                tracing::debug!("Current state: {:?}", self.resolve_deltas().await);
-                {
-                    let mut deltas = self.deltas.lock().await;
-                    deltas.insert(seqn, bytes);
+                let mut deltas = self.deltas.lock().await;
+                tracing::debug!("Current state: {:?}", resolve_deltas(&deltas));
+                deltas.insert(seqn, bytes);
+                tracing::debug!("State after write: {:?}", resolve_deltas(&deltas));
+                let new_checksum = libsync::checksum(&*deltas);
+                if new_checksum != checksum {
+                    todo!(
+                        "checksum don't match. Expected: {}, Received: {}",
+                        new_checksum,
+                        checksum
+                    );
                 }
-                let new_checksum = libsync::checksum(&*self.deltas.lock().await);
-                tracing::debug!("State after write: {:?}", self.resolve_deltas().await);
-                // if new_checksum != checksum {
-                //     todo!(
-                //         "checksum don't match. Expected: {}, Received: {}",
-                //         new_checksum,
-                //         checksum
-                //     );
-                // }
                 Some(Frame::WriteAck { seqn })
             }
             Frame::WriteAck { seqn } => {
@@ -114,17 +106,16 @@ impl Session {
             .last_acknowledged_seqn
             .load(std::sync::atomic::Ordering::Relaxed);
         let seqn = self.seqn.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let total_bytes = {
-            let mut deltas = self.deltas.lock().await;
-            deltas.insert(seqn, bytes.to_vec());
-            deltas
-                .range((last_acknowledged_seqn + 1)..)
-                .map(|(_, delta)| delta)
-                .flatten()
-                .cloned()
-                .collect()
-        };
-        let checksum = libsync::checksum(self.resolve_deltas().await);
+        let mut deltas = self.deltas.lock().await;
+        deltas.insert(seqn, bytes.to_vec());
+        let checksum = libsync::checksum(&*deltas);
+        tracing::debug!("Current state: {:?}", resolve_deltas(&deltas));
+        let total_bytes = deltas
+            .range((last_acknowledged_seqn + 1)..)
+            .map(|(_, delta)| delta)
+            .flatten()
+            .cloned()
+            .collect();
 
         self.send(Frame::Write {
             bytes: total_bytes,

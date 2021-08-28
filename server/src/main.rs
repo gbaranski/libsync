@@ -91,15 +91,14 @@ impl Server {
                     }
                 };
 
-                // TODO: Verify checksum
-                // let new_checksum = libsync::checksum(&*deltas);
-                // if new_checksum != checksum {
-                //     todo!(
-                //         "checksum don't match. Expected: {}, Received: {}",
-                //         new_checksum,
-                //         checksum
-                //     );
-                // }
+                let new_checksum = libsync::checksum(&*deltas);
+                if new_checksum != checksum {
+                    todo!(
+                        "checksum don't match. Expected: {}, Received: {}",
+                        new_checksum,
+                        checksum
+                    );
+                }
                 Some(Frame::WriteAck { seqn })
             }
             Frame::WriteAck { seqn } => {
@@ -128,7 +127,7 @@ impl Server {
             None => 0,
         };
         deltas.insert(seqn, bytes.to_vec());
-        let checksum = libsync::checksum(resolve_deltas(&deltas));
+        let checksum = libsync::checksum(&*deltas);
         let unacknowledged_deltas = deltas
             .range(last_acknowledged_seqn..)
             .map(|(_, delta)| delta)
