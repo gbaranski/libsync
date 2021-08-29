@@ -1,4 +1,3 @@
-use crate::delta;
 use crate::delta::Delta;
 use crate::delta::Deltas;
 use crate::frame::AtomicSequenceNumber;
@@ -73,23 +72,24 @@ impl Session {
     async fn handle_frame(&self, frame: Frame) -> Result<Option<Frame>, Error> {
         Ok(match frame {
             Frame::Write {
-                delta,
-                checksum,
-                seqn,
+                new_deltas,
+                state_checksum,
             } => {
                 let mut deltas = self.deltas.lock().await;
                 tracing::debug!("Current state: {:?}", deltas);
-                deltas.insert(seqn, delta);
+                deltas.insert_many(new_deltas);
                 tracing::debug!("State after write: {:?}", deltas);
                 let new_checksum = deltas.checksum();
-                if new_checksum != checksum {
+                if new_checksum != state_checksum {
                     todo!(
                         "checksum don't match. Expected: {}, Received: {}",
                         new_checksum,
-                        checksum
+                        state_checksum
                     );
                 }
-                Some(Frame::WriteAck { seqn })
+                Some(Frame::WriteAck {
+                    seqn: deltas.latest_seqn(),
+                })
             }
             Frame::WriteAck { seqn } => {
                 self.last_acknowledged_seqn
@@ -117,12 +117,10 @@ impl Session {
         tracing::debug!("State: {:?}", deltas);
         let unacknowledged_deltas = deltas.since(&last_acknowledged_seqn);
         tracing::debug!("Unacknowledged deltas: {:?}", unacknowledged_deltas);
-        let unacknowledged_delta = delta::merge(unacknowledged_deltas.iter());
 
         self.send(Frame::Write {
-            delta: unacknowledged_delta,
-            checksum: deltas.checksum(),
-            seqn,
+            new_deltas: unacknowledged_deltas,
+            state_checksum: deltas.checksum(),
         })
         .await?;
         Ok(())

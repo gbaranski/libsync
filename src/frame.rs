@@ -22,9 +22,8 @@ use serde::Serialize;
 #[serde(tag = "type")]
 pub enum Frame {
     Write {
-        delta: Delta,
-        checksum: u32,
-        seqn: SequenceNumber,
+        new_deltas: Vec<(SequenceNumber, Delta)>,
+        state_checksum: u32,
     },
     WriteAck {
         seqn: SequenceNumber,

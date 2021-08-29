@@ -1,4 +1,3 @@
-use crate::delta;
 use crate::delta::Delta;
 use crate::delta::Deltas;
 use crate::frame::AtomicSequenceNumber;
@@ -82,35 +81,25 @@ impl Server {
     async fn handle_frame(&self, frame: Frame, from: SocketAddr) -> Result<Option<Frame>, Error> {
         Ok(match frame {
             Frame::Write {
-                delta,
-                checksum,
-                seqn,
+                new_deltas,
+                state_checksum,
             } => {
                 let mut deltas = self.deltas.lock().await;
                 tracing::debug!("State: {:?}", deltas);
-                let latest_seqn = deltas.latest_seqn();
-                let response = if deltas.latest_seqn() > seqn {
-                    tracing::debug!(
-                        "Received seqn: {} is lower than latest seqn: {}. Skipping update",
-                        seqn,
-                        latest_seqn
+                deltas.insert_many(new_deltas);
+                tracing::debug!("State after update: {:?}", deltas);
+                let new_checksum = deltas.checksum();
+                if new_checksum != state_checksum {
+                    todo!(
+                        "checksum don't match. Expected: {}, Received: {}",
+                        new_checksum,
+                        state_checksum
                     );
-                    None
-                } else {
-                    deltas.insert(seqn, delta);
-                    tracing::debug!("State after update: {:?}", deltas);
-                    let new_checksum = deltas.checksum();
-                    if new_checksum != checksum {
-                        todo!(
-                            "checksum don't match. Expected: {}, Received: {}",
-                            new_checksum,
-                            checksum
-                        );
-                    }
-                    Some(Frame::WriteAck { seqn })
-                };
+                }
                 self.write_notify.notify_one();
-                response
+                Some(Frame::WriteAck {
+                    seqn: deltas.latest_seqn(),
+                })
             }
             Frame::WriteAck { seqn } => {
                 self.last_acknowledged_seqn
@@ -137,14 +126,12 @@ impl Server {
         deltas.insert(seqn, delta);
         tracing::debug!("State: {:?}", deltas);
         let unacknowledged_deltas = deltas.since(&last_acknowledged_seqn);
-        let unacknowledged_delta = delta::merge(unacknowledged_deltas.iter());
 
         self.send(
             address,
             Frame::Write {
-                delta: unacknowledged_delta,
-                checksum: deltas.checksum(),
-                seqn,
+                new_deltas: unacknowledged_deltas,
+                state_checksum: deltas.checksum(),
             },
         )
         .await?;

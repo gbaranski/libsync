@@ -42,11 +42,10 @@ impl Deltas {
         resolve(self.tree.iter().map(|(_, delta)| delta))
     }
 
-    pub fn since(&self, seqn: &SequenceNumber) -> Vec<Delta> {
+    pub fn since(&self, seqn: &SequenceNumber) -> Vec<(SequenceNumber, Delta)> {
         self.tree
             .range((seqn + 1)..)
-            .map(|(_, delta)| delta)
-            .cloned()
+            .map(|(seqn, delta)| (seqn.clone(), delta.clone())) // TODO: Optimize this
             .collect()
     }
 
