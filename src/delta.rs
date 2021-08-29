@@ -14,6 +14,7 @@ pub enum Delta {
 
 #[derive(Default)]
 pub struct Deltas {
+    // TODO: Consider changing to Vec instead of BTreeMap
     tree: BTreeMap<SequenceNumber, Delta>,
 }
 

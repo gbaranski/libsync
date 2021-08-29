@@ -14,6 +14,7 @@ thiserror = "1.0.26"
 tracing = "0.1.26"
 tokio = { version = "1.10.1", features = ["net", "sync"] }
 async-trait = "0.1.51"
+dashmap = "4.0.2"
 
 [dev-dependencies]
 tokio = { version = "1.10.1", features = ["net", "sync", "time", "macros", "rt-multi-thread"] }

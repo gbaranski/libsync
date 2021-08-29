@@ -1,11 +1,14 @@
 use crate::delta::Delta;
 use crate::delta::Deltas;
 use crate::frame::AtomicSequenceNumber;
+use crate::frame::ClientFrame;
 use crate::frame::DeserializeError;
 use crate::frame::Frame;
-use crate::frame::SequenceNumber;
 use crate::frame::SerializeError;
-use std::collections::BTreeMap;
+use crate::frame::ServerFrame;
+use crate::frame::WriteAckFrame;
+use crate::frame::WriteFrame;
+use dashmap::DashMap;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -26,16 +29,73 @@ pub enum Error {
 
 pub struct Server {
     socket: UdpSocket,
-    address: RwLock<Option<SocketAddr>>,
-    // TODO: Consider changing to Vec instead of BTreeMap
+    sessions: DashMap<crate::session::ID, Session>,
+}
+
+pub struct Session {
     pub deltas: Mutex<Deltas>,
     pub write_notify: Notify,
-    /// Last acknowledged sequence number
+    remote_address: RwLock<SocketAddr>,
     last_acknowledged_seqn: AtomicSequenceNumber,
 }
 
-pub fn resolve_deltas(deltas: &BTreeMap<SequenceNumber, Vec<u8>>) -> Vec<u8> {
-    deltas.values().flatten().cloned().collect()
+impl Session {
+    pub fn new(remote_address: SocketAddr) -> Self {
+        Self {
+            deltas: Mutex::new(Deltas::new()),
+            write_notify: Notify::new(),
+            remote_address: RwLock::new(remote_address),
+            last_acknowledged_seqn: AtomicSequenceNumber::new(0),
+        }
+    }
+
+    pub async fn on_write(&self, frame: WriteFrame) -> Result<Option<ServerFrame>, Error> {
+        let mut deltas = self.deltas.lock().await;
+        tracing::debug!("State: {:?}", deltas);
+        deltas.insert_many(frame.new_deltas);
+        tracing::debug!("State after update: {:?}", deltas);
+        let new_checksum = deltas.checksum();
+        if new_checksum != frame.state_checksum {
+            todo!(
+                "checksum don't match. Expected: {}, Received: {}",
+                new_checksum,
+                frame.state_checksum
+            );
+        }
+        self.write_notify.notify_one();
+        Ok(Some(ServerFrame {
+            inner: Frame::WriteAck(WriteAckFrame {
+                seqn: deltas.latest_seqn(),
+            }),
+        }))
+    }
+
+    pub async fn on_write_ack(&self, frame: WriteAckFrame) -> Result<Option<ServerFrame>, Error> {
+        if self
+            .last_acknowledged_seqn
+            .load(std::sync::atomic::Ordering::Relaxed)
+            < frame.seqn
+        {}
+        self.last_acknowledged_seqn
+            .store(frame.seqn, std::sync::atomic::Ordering::Relaxed);
+        Ok(None)
+    }
+
+    pub async fn write(&self, delta: Delta) -> Result<WriteFrame, Error> {
+        let last_acknowledged_seqn = self
+            .last_acknowledged_seqn
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut deltas = self.deltas.lock().await;
+        let seqn = deltas.latest_seqn();
+        deltas.insert(seqn, delta);
+        tracing::debug!("State: {:?}", deltas);
+        let unacknowledged_deltas = deltas.since(&last_acknowledged_seqn);
+
+        Ok(WriteFrame {
+            new_deltas: unacknowledged_deltas,
+            state_checksum: deltas.checksum(),
+        })
+    }
 }
 
 impl Server {
@@ -46,11 +106,8 @@ impl Server {
 
     pub fn with_socket(socket: UdpSocket) -> Self {
         Self {
-            address: RwLock::new(None),
             socket,
-            deltas: Mutex::new(Deltas::new()),
-            last_acknowledged_seqn: AtomicSequenceNumber::new(0),
-            write_notify: Notify::new(),
+            sessions: DashMap::new(),
         }
     }
 
@@ -61,53 +118,33 @@ impl Server {
             if n == 0 {
                 return Ok(());
             }
-            if *self.address.read().await != Some(from) {
-                *self.address.write().await = Some(from);
+            let client_frame = ClientFrame::deserialize(&buf[..n])?;
+            let session = match self.sessions.get(&client_frame.session_id) {
+                Some(session) => session,
+                None => {
+                    let session = Session::new(from);
+                    self.sessions.insert(client_frame.session_id, session);
+                    self.sessions.get(&client_frame.session_id).unwrap()
+                }
+            };
+            if *session.remote_address.read().await != from {
+                *session.remote_address.write().await = from;
             }
-            let frame = Frame::deserialize(&buf[..n])?;
-            tracing::debug!("Received: {:?}", frame);
-            if let Some(frame) = self.handle_frame(frame, from).await? {
-                tracing::debug!("Sent: {:?}", frame);
+            tracing::debug!("Received: {:?}", client_frame);
+            let server_frame = match client_frame.inner {
+                Frame::Write(write) => session.on_write(write).await,
+                Frame::WriteAck(write_ack) => session.on_write_ack(write_ack).await,
+            }?;
+            if let Some(server_frame) = server_frame {
                 self.socket
-                    .send_to(frame.serialize()?.as_bytes(), from)
+                    .send_to(server_frame.serialize()?.as_bytes(), from)
                     .await?;
+                tracing::debug!("Sent: {:?}", server_frame);
             }
         }
     }
 
-    #[tracing::instrument(skip(self))]
-    async fn handle_frame(&self, frame: Frame, from: SocketAddr) -> Result<Option<Frame>, Error> {
-        Ok(match frame {
-            Frame::Write {
-                new_deltas,
-                state_checksum,
-            } => {
-                let mut deltas = self.deltas.lock().await;
-                tracing::debug!("State: {:?}", deltas);
-                deltas.insert_many(new_deltas);
-                tracing::debug!("State after update: {:?}", deltas);
-                let new_checksum = deltas.checksum();
-                if new_checksum != state_checksum {
-                    todo!(
-                        "checksum don't match. Expected: {}, Received: {}",
-                        new_checksum,
-                        state_checksum
-                    );
-                }
-                self.write_notify.notify_one();
-                Some(Frame::WriteAck {
-                    seqn: deltas.latest_seqn(),
-                })
-            }
-            Frame::WriteAck { seqn } => {
-                self.last_acknowledged_seqn
-                    .store(seqn, std::sync::atomic::Ordering::Relaxed);
-                None
-            }
-        })
-    }
-
-    async fn send(&self, address: &SocketAddr, frame: Frame) -> Result<(), Error> {
+    async fn send(&self, address: &SocketAddr, frame: ServerFrame) -> Result<(), Error> {
         self.socket
             .send_to(frame.serialize()?.as_bytes(), address)
             .await?;
@@ -115,21 +152,13 @@ impl Server {
         Ok(())
     }
 
-    pub async fn write(&self, address: &SocketAddr, delta: Delta) -> Result<(), Error> {
-        let last_acknowledged_seqn = self
-            .last_acknowledged_seqn
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut deltas = self.deltas.lock().await;
-        let seqn = deltas.latest_seqn();
-        deltas.insert(seqn, delta);
-        tracing::debug!("State: {:?}", deltas);
-        let unacknowledged_deltas = deltas.since(&last_acknowledged_seqn);
-
+    pub async fn write(&self, delta: Delta, session: &Session) -> Result<(), Error> {
+        let frame = session.write(delta).await?;
+        let remote_address = session.remote_address.read().await;
         self.send(
-            address,
-            Frame::Write {
-                new_deltas: unacknowledged_deltas,
-                state_checksum: deltas.checksum(),
+            &remote_address,
+            ServerFrame {
+                inner: Frame::Write(frame),
             },
         )
         .await?;

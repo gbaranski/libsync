@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = matches.value_of("address").unwrap();
     let (ip, port) = match address.split_once(':') {
         Some((host, port)) => (host, port.parse().expect("invalid port")),
-        None => (address, libsync::PORT),
+        None => (address, libsync::server::DEFAULT_PORT),
     };
     let ip = IpAddr::from_str(ip).expect("invalid ip address");
 
