@@ -45,7 +45,7 @@ impl Deltas {
     pub fn since(&self, seqn: &SequenceNumber) -> Vec<(SequenceNumber, Delta)> {
         self.tree
             .range((seqn + 1)..)
-            .map(|(seqn, delta)| (seqn.clone(), delta.clone())) // TODO: Optimize this
+            .map(|(seqn, delta)| (*seqn, delta.clone())) // TODO: Optimize this
             .collect()
     }
 
