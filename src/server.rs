@@ -7,7 +7,6 @@ use crate::frame::SequenceNumber;
 use crate::frame::SerializeError;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -25,15 +24,14 @@ pub enum Error {
     Deserialize(#[from] DeserializeError),
 }
 
-#[derive(Clone)]
 pub struct Server {
-    socket: Arc<UdpSocket>,
-    address: Arc<RwLock<Option<SocketAddr>>>,
+    socket: UdpSocket,
+    address: RwLock<Option<SocketAddr>>,
     // TODO: Consider changing to Vec instead of BTreeMap
-    pub deltas: Arc<Mutex<Deltas>>,
-    pub write_notify: Arc<Notify>,
+    pub deltas: Mutex<Deltas>,
+    pub write_notify: Notify,
     /// Last acknowledged sequence number
-    last_acknowledged_seqn: Arc<AtomicSequenceNumber>,
+    last_acknowledged_seqn: AtomicSequenceNumber,
 }
 
 pub fn resolve_deltas(deltas: &BTreeMap<SequenceNumber, Vec<u8>>) -> Vec<u8> {
@@ -48,11 +46,11 @@ impl Server {
 
     pub fn with_socket(socket: UdpSocket) -> Self {
         Self {
-            address: Arc::new(RwLock::new(None)),
-            socket: Arc::new(socket),
-            deltas: Arc::new(Mutex::new(Deltas::new())),
-            last_acknowledged_seqn: Arc::new(AtomicSequenceNumber::new(0)),
-            write_notify: Arc::new(Notify::new()),
+            address: RwLock::new(None),
+            socket,
+            deltas: Mutex::new(Deltas::new()),
+            last_acknowledged_seqn: AtomicSequenceNumber::new(0),
+            write_notify: Notify::new(),
         }
     }
 

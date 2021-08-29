@@ -2,6 +2,7 @@ use libsync::server::Server;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";
@@ -41,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let ip = IpAddr::from_str(ip).expect("invalid ip address");
 
-    let server = Server::new(SocketAddr::new(ip, port)).await?;
+    let server = Arc::new(Server::new(SocketAddr::new(ip, port)).await?);
     tracing::info!("Starting server");
     let run_server_task = {
         let server = server.clone();

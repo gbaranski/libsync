@@ -1,6 +1,7 @@
 use libsync::client::Session;
 use libsync::delta::Delta;
 use std::net::ToSocketAddrs;
+use std::sync::Arc;
 
 fn init_logging() {
     const LOG_ENV: &str = "RUST_LOG";
@@ -60,14 +61,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .next()
     .unwrap();
 
-    let session = Session::new(address).await?;
+    let session = Arc::new(Session::new(address).await?);
     let run_session_task = {
         let session = session.clone();
         tokio::spawn(async move { session.run().await.unwrap() })
     };
     let read_input_task = {
         let session = session.clone();
-        tokio::spawn(async move { read_input(session).await.unwrap() })
+        tokio::spawn(async move { read_input(&session).await.unwrap() })
     };
     tokio::select! {
         value = run_session_task => value.unwrap(),
@@ -108,7 +109,7 @@ fn get_input<'a>(term: &console::Term, buf: &'a mut [u8]) -> &'a [u8] {
     }
 }
 
-async fn read_input(session: Session) -> Result<(), Box<dyn std::error::Error>> {
+async fn read_input(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = vec![0; 8];
     let term = console::Term::stdout();
     loop {

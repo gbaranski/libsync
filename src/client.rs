@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
@@ -23,13 +22,13 @@ pub enum Error {
     Deserialize(#[from] DeserializeError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Session {
-    socket: Arc<UdpSocket>,
+    socket: UdpSocket,
     // TODO: Consider changing to Vec instead of BTreeMap
-    deltas: Arc<Mutex<Deltas>>,
+    deltas: Mutex<Deltas>,
     /// Last acknowledged sequence number
-    last_acknowledged_seqn: Arc<AtomicSequenceNumber>,
+    last_acknowledged_seqn: AtomicSequenceNumber,
 }
 
 pub fn resolve_deltas(deltas: &BTreeMap<SequenceNumber, Vec<u8>>) -> Vec<u8> {
@@ -43,9 +42,9 @@ impl Session {
         socket.connect(address).await?;
 
         Ok(Self {
-            socket: Arc::new(socket),
-            deltas: Arc::new(Mutex::new(Deltas::default())),
-            last_acknowledged_seqn: Arc::new(AtomicSequenceNumber::new(0)),
+            socket,
+            deltas: Mutex::new(Deltas::default()),
+            last_acknowledged_seqn: AtomicSequenceNumber::new(0),
         })
     }
 
